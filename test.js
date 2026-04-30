@@ -190,8 +190,8 @@ bot.on('message', async msg => {
         bot.sendMessage(chatId, 'Choose connection method:', {
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: '🌐 MATAPI', callback_data: 'connect_maytapi', style: 'success' },
-                     { text: '📱 QR CODE LOGIN', callback_data: 'connect_qr', style: 'primary'}]
+                    [{ text: '🌐 Maytapi', callback_data: 'connect_maytapi' },
+                     { text: '📱 QR Code Login', callback_data: 'connect_qr' }]
                 ]
             }
         });

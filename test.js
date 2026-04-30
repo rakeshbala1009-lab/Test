@@ -111,7 +111,10 @@ function startQRLogin(chatId) {
 
     const client = new WhatsAppClient({
         authStrategy: new LocalAuth({ clientId: 'bot_session' }),
-        puppeteer: { headless: true }           // use headless Chrome
+        puppeteer: {
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']   // ← FIX for root
+        }
     });
     activeQRClient = client;
 
@@ -152,9 +155,7 @@ function startQRLogin(chatId) {
     });
 
     client.initialize()
-        .then(() => {
-            console.log('WhatsApp client initialized.');
-        })
+        .then(() => console.log('WhatsApp client initialized.'))
         .catch(err => {
             console.error('QR init error:', err);
             bot.sendMessage(chatId, '❌ Failed to start QR login. Check console for details.');

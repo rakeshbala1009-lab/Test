@@ -15,6 +15,10 @@ let activeBackend = null;               // 'maytapi' | 'qr'
 let activeMaytapi = null;
 let activeQRClient = null;
 
+// QR session tracking
+let qrSessionChatId = null;
+let qrMessageId = null;
+
 // Maytapi pool
 let apiPool = [];
 let activeStatusPollInterval = null;
@@ -102,28 +106,44 @@ async function trySetActiveMaytapi() {
     return false;
 }
 
-// ─── QR Client ───
+// ─── QR Client (with NEW QR button) ───
 function startQRLogin(chatId) {
+    // If a previous QR session exists, destroy it silently
     if (activeQRClient) {
         try { activeQRClient.destroy(); } catch {}
         activeQRClient = null;
     }
 
+    qrSessionChatId = chatId;
     const client = new WhatsAppClient({
         authStrategy: new LocalAuth({ clientId: 'bot_session' }),
         puppeteer: {
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']   // ← FIX for root
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
         }
     });
     activeQRClient = client;
 
     client.on('qr', async (qr) => {
         try {
+            // Delete the previous QR message (if any) to avoid clutter
+            if (qrMessageId && qrSessionChatId) {
+                bot.deleteMessage(qrSessionChatId, qrMessageId).catch(() => {});
+            }
+
             const qrImage = await QRCode.toBuffer(qr, { type: 'png', width: 400 });
             const imgPath = path.join(__dirname, `qr_${Date.now()}.png`);
             fs.writeFileSync(imgPath, qrImage);
-            await bot.sendPhoto(chatId, imgPath, { caption: '📷 Scan this QR code with your WhatsApp (Linked Devices → Link a Device).' });
+
+            const sent = await bot.sendPhoto(chatId, imgPath, {
+                caption: '📷 Scan this QR code with your WhatsApp (Linked Devices → Link a Device).',
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: '🔄 New QR', callback_data: 'new_qr, style: 'danger'' }
+                    ]]
+                }
+            });
+            qrMessageId = sent.message_id;
             fs.unlinkSync(imgPath);
         } catch (e) {
             console.error('QR generation failed:', e);
@@ -141,6 +161,9 @@ function startQRLogin(chatId) {
             activeMaytapi = null;
             if (activeStatusPollInterval) clearInterval(activeStatusPollInterval);
         }
+        // Clean up QR tracking
+        qrSessionChatId = null;
+        qrMessageId = null;
     });
 
     client.on('disconnected', (reason) => {
@@ -152,6 +175,8 @@ function startQRLogin(chatId) {
         }
         client.destroy().catch(() => {});
         activeQRClient = null;
+        qrSessionChatId = null;
+        qrMessageId = null;
     });
 
     client.initialize()
@@ -160,6 +185,8 @@ function startQRLogin(chatId) {
             console.error('QR init error:', err);
             bot.sendMessage(chatId, '❌ Failed to start QR login. Check console for details.');
             activeQRClient = null;
+            qrSessionChatId = null;
+            qrMessageId = null;
         });
 }
 
@@ -175,6 +202,8 @@ async function disconnectActive(chatId) {
     }
     activeBackend = null;
     isConnected = false;
+    qrSessionChatId = null;
+    qrMessageId = null;
     bot.sendMessage(chatId, '🔌 Disconnected successfully.');
 }
 
@@ -190,8 +219,8 @@ bot.on('message', async msg => {
         bot.sendMessage(chatId, 'Choose connection method:', {
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: '🌐 MATAPI', callback_data: 'connect_maytapi', style: 'success' },
-                     { text: '📱 QR CODE LOGIN', callback_data: 'connect_qr', style: 'primary'}]
+                    [{ text: '🌐 MATAPI', callback_data: 'connect_maytapi' },
+                     { text: '📱 QR CODE LOGIN', callback_data: 'connect_qr' }]
                 ]
             }
         });
@@ -241,7 +270,7 @@ bot.on('callback_query', async query => {
     if (data === 'connect_maytapi') {
         bot.answerCallbackQuery(query.id);
         expectingMaytapiUrl = true;
-        bot.sendMessage(chatId, '🔗 Send your Maytapi screen URL (e.g. https://api.maytapi.com/api/.../screen?token=...)');
+        bot.sendMessage(chatId, '🔗 Send your Maytapi screen URL');
         return;
     }
 
@@ -251,9 +280,30 @@ bot.on('callback_query', async query => {
         startQRLogin(chatId);
         return;
     }
+
+    // ─── NEW QR button handler ───
+    if (data === 'new_qr') {
+        bot.answerCallbackQuery(query.id);
+        // Only proceed if we are in the same chat where the QR was sent
+        if (qrSessionChatId !== chatId) {
+            bot.sendMessage(chatId, 'This QR is from a different session. Start a new one.');
+            return;
+        }
+        // Delete the old QR message
+        if (qrMessageId) {
+            bot.deleteMessage(chatId, qrMessageId).catch(() => {});
+        }
+        // Destroy current client and start a fresh one
+        if (activeQRClient) {
+            try { await activeQRClient.destroy(); } catch {}
+            activeQRClient = null;
+        }
+        startQRLogin(chatId);
+        return;
+    }
 });
 
-// ── File check (lightning fast) ──
+// ── File check ──
 async function checkWithMaytapi(numbers) {
     const registered = [], fresh = [];
     for (const raw of numbers) {
@@ -342,4 +392,4 @@ bot.on('document', async msg => {
     }
 });
 
-console.log('Bot running – KBS styled keyboard + QR/Maytapi');
+console.log('Bot running – KBS styled keyboard + QR with inline New QR button');

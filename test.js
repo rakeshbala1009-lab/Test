@@ -27,14 +27,14 @@ let checkingDone = 0;
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// ─── KBS‑styled reply keyboard (coloured buttons) ───
+// ─── KBS‑styled reply keyboard ───
 function getMainKeyboard() {
     return {
         reply_markup: {
             keyboard: [
                 [{ text: '🔗 Connect WhatsApp', style: 'primary' }],
                 [{ text: '🔌 Disconnect', style: 'danger' },
-                 { text: '📂 Check WhatsApp', style: 'primary' }]
+                 { text: '📂 Check WhatsApp', style: 'success' }]
             ],
             resize_keyboard: true,
             one_time_keyboard: false
@@ -108,22 +108,32 @@ function startQRLogin(chatId) {
         try { activeQRClient.destroy(); } catch {}
         activeQRClient = null;
     }
-    const client = new WhatsAppClient({ authStrategy: new LocalAuth({ clientId: 'bot_session' }) });
+
+    const client = new WhatsAppClient({
+        authStrategy: new LocalAuth({ clientId: 'bot_session' }),
+        puppeteer: { headless: true }           // use headless Chrome
+    });
     activeQRClient = client;
 
     client.on('qr', async (qr) => {
-        const qrImage = await QRCode.toBuffer(qr, { type: 'png', width: 400 });
-        const imgPath = path.join(__dirname, `qr_${Date.now()}.png`);
-        fs.writeFileSync(imgPath, qrImage);
-        await bot.sendPhoto(chatId, imgPath, { caption: '📷 Scan this QR code with your WhatsApp (Linked Devices → Link a Device).' });
-        fs.unlinkSync(imgPath);
+        try {
+            const qrImage = await QRCode.toBuffer(qr, { type: 'png', width: 400 });
+            const imgPath = path.join(__dirname, `qr_${Date.now()}.png`);
+            fs.writeFileSync(imgPath, qrImage);
+            await bot.sendPhoto(chatId, imgPath, { caption: '📷 Scan this QR code with your WhatsApp (Linked Devices → Link a Device).' });
+            fs.unlinkSync(imgPath);
+        } catch (e) {
+            console.error('QR generation failed:', e);
+            bot.sendMessage(chatId, '❌ Failed to generate QR code. Check console.');
+        }
     });
 
     client.on('ready', async () => {
         activeBackend = 'qr';
         isConnected = true;
-        const me = client.info.me?.user || client.info.wid?.user;
-        bot.sendMessage(chatId, `✅ QR login successful! Connected as +${me || 'unknown'}.`);
+        const me = client.info.me?.user || client.info.wid?.user || '';
+        const message = me ? `✅ QR login successful! Connected as +${me}.` : '✅ QR login successful!';
+        bot.sendMessage(chatId, message);
         if (activeMaytapi) {
             activeMaytapi = null;
             if (activeStatusPollInterval) clearInterval(activeStatusPollInterval);
@@ -141,10 +151,15 @@ function startQRLogin(chatId) {
         activeQRClient = null;
     });
 
-    client.initialize().catch(err => {
-        console.error('QR init error:', err);
-        bot.sendMessage(chatId, '❌ Failed to start QR login.');
-    });
+    client.initialize()
+        .then(() => {
+            console.log('WhatsApp client initialized.');
+        })
+        .catch(err => {
+            console.error('QR init error:', err);
+            bot.sendMessage(chatId, '❌ Failed to start QR login. Check console for details.');
+            activeQRClient = null;
+        });
 }
 
 async function disconnectActive(chatId) {
@@ -170,7 +185,6 @@ bot.on('message', async msg => {
     const text = msg.text;
     if (!text) return;
 
-    // Main keyboard buttons (KBS styled)
     if (text === '🔗 Connect WhatsApp') {
         bot.sendMessage(chatId, 'Choose connection method:', {
             reply_markup: {
@@ -197,7 +211,6 @@ bot.on('message', async msg => {
         return;
     }
 
-    // Maytapi URL input
     if (expectingMaytapiUrl) {
         expectingMaytapiUrl = false;
         const parsed = parseMaytapiUrl(text.trim());
@@ -220,7 +233,6 @@ bot.on('message', async msg => {
     }
 });
 
-// ── Inline button handler ──
 bot.on('callback_query', async query => {
     const chatId = query.message.chat.id;
     const data = query.data;
@@ -240,7 +252,7 @@ bot.on('callback_query', async query => {
     }
 });
 
-// ── File check (lightning fast, concurrency 50) ──
+// ── File check (lightning fast) ──
 async function checkWithMaytapi(numbers) {
     const registered = [], fresh = [];
     for (const raw of numbers) {
@@ -305,7 +317,6 @@ bot.on('document', async msg => {
 
         await bot.deleteMessage(chatId, checkingMessageId).catch(() => {});
 
-        // Report message
         let report = '';
         if (results.registered.length) {
             report += '*Already Created Account Number ✅:*\n' + results.registered.join('\n') + '\n\n';
@@ -315,7 +326,6 @@ bot.on('document', async msg => {
         }
         if (report) bot.sendMessage(chatId, report, { parse_mode: 'Markdown' });
 
-        // Fresh numbers as .txt file
         if (results.fresh.length) {
             const freshPath = path.join(__dirname, 'Freash_Number.txt');
             fs.writeFileSync(freshPath, results.fresh.map(n => `+${n}`).join('\n'), 'utf-8');
@@ -331,4 +341,4 @@ bot.on('document', async msg => {
     }
 });
 
-console.log('Bot running – KBS styled reply keyboard + Maytapi/QR');
+console.log('Bot running – KBS styled keyboard + QR/Maytapi');

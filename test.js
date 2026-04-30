@@ -15,10 +15,6 @@ let activeBackend = null;               // 'maytapi' | 'qr'
 let activeMaytapi = null;
 let activeQRClient = null;
 
-// QR session tracking
-let qrSessionChatId = null;
-let qrMessageId = null;
-
 // Maytapi pool
 let apiPool = [];
 let activeStatusPollInterval = null;
@@ -28,6 +24,9 @@ let checkingChatId = null;
 let checkingMessageId = null;
 let checkingTotal = 0;
 let checkingDone = 0;
+
+// QR message tracking (so we can delete old QR and buttons)
+let qrMessageId = null;
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
@@ -106,15 +105,61 @@ async function trySetActiveMaytapi() {
     return false;
 }
 
-// ─── QR Client (with NEW QR button) ───
-function startQRLogin(chatId) {
-    // If a previous QR session exists, destroy it silently
-    if (activeQRClient) {
-        try { activeQRClient.destroy(); } catch {}
-        activeQRClient = null;
+// ─── QR Client ───
+async function sendQRForClient(chatId, client) {
+    // Delete old QR message if exists
+    if (qrMessageId) {
+        try { await bot.deleteMessage(chatId, qrMessageId); } catch {}
+        qrMessageId = null;
     }
 
-    qrSessionChatId = chatId;
+    // Wait for next QR event with timeout
+    const qrPromise = new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('QR timeout')), 45000);
+        client.once('qr', (qr) => {
+            clearTimeout(timeout);
+            resolve(qr);
+        });
+        // If client is already authenticated, no QR will come
+        client.once('ready', () => {
+            clearTimeout(timeout);
+            reject(new Error('already_authenticated'));
+        });
+    });
+
+    try {
+        const qr = await qrPromise;
+        const qrImage = await QRCode.toBuffer(qr, { type: 'png', width: 400 });
+        const imgPath = path.join(__dirname, `qr_${Date.now()}.png`);
+        fs.writeFileSync(imgPath, qrImage);
+
+        const sent = await bot.sendPhoto(chatId, imgPath, {
+            caption: '📷 Scan this QR code with your WhatsApp\n(Linked Devices → Link a Device)',
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: '🔄 NEW QR', callback_data: 'new_qr', style: 'success' }]
+                ]
+            }
+        });
+        qrMessageId = sent.message_id;
+        fs.unlinkSync(imgPath);
+    } catch (e) {
+        if (e.message === 'already_authenticated') {
+            bot.sendMessage(chatId, '✅ Already authenticated. No QR needed.');
+        } else {
+            console.error('QR generation failed:', e);
+            bot.sendMessage(chatId, '❌ Failed to generate QR code. Click New QR to try again.');
+        }
+    }
+}
+
+function startQRLogin(chatId) {
+    if (activeQRClient) {
+        // If already exists, just send a fresh QR
+        sendQRForClient(chatId, activeQRClient).catch(() => {});
+        return;
+    }
+
     const client = new WhatsAppClient({
         authStrategy: new LocalAuth({ clientId: 'bot_session' }),
         puppeteer: {
@@ -123,33 +168,6 @@ function startQRLogin(chatId) {
         }
     });
     activeQRClient = client;
-
-    client.on('qr', async (qr) => {
-        try {
-            // Delete the previous QR message (if any) to avoid clutter
-            if (qrMessageId && qrSessionChatId) {
-                bot.deleteMessage(qrSessionChatId, qrMessageId).catch(() => {});
-            }
-
-            const qrImage = await QRCode.toBuffer(qr, { type: 'png', width: 400 });
-            const imgPath = path.join(__dirname, `qr_${Date.now()}.png`);
-            fs.writeFileSync(imgPath, qrImage);
-
-            const sent = await bot.sendPhoto(chatId, imgPath, {
-                caption: '📷 Scan this QR code with your WhatsApp (Linked Devices → Link a Device).',
-                reply_markup: {
-                    inline_keyboard: [[
-                        { text: '🔄 New QR', callback_data: 'new_qr, style: 'danger'' }
-                    ]]
-                }
-            });
-            qrMessageId = sent.message_id;
-            fs.unlinkSync(imgPath);
-        } catch (e) {
-            console.error('QR generation failed:', e);
-            bot.sendMessage(chatId, '❌ Failed to generate QR code. Check console.');
-        }
-    });
 
     client.on('ready', async () => {
         activeBackend = 'qr';
@@ -161,9 +179,11 @@ function startQRLogin(chatId) {
             activeMaytapi = null;
             if (activeStatusPollInterval) clearInterval(activeStatusPollInterval);
         }
-        // Clean up QR tracking
-        qrSessionChatId = null;
-        qrMessageId = null;
+        // Delete old QR message on success
+        if (qrMessageId) {
+            try { await bot.deleteMessage(chatId, qrMessageId); } catch {}
+            qrMessageId = null;
+        }
     });
 
     client.on('disconnected', (reason) => {
@@ -175,18 +195,19 @@ function startQRLogin(chatId) {
         }
         client.destroy().catch(() => {});
         activeQRClient = null;
-        qrSessionChatId = null;
         qrMessageId = null;
     });
 
     client.initialize()
-        .then(() => console.log('WhatsApp client initialized.'))
+        .then(() => {
+            console.log('WhatsApp client initialized.');
+            // Send QR once
+            sendQRForClient(chatId, client).catch(() => {});
+        })
         .catch(err => {
             console.error('QR init error:', err);
-            bot.sendMessage(chatId, '❌ Failed to start QR login. Check console for details.');
+            bot.sendMessage(chatId, '❌ Failed to start QR login. Check console.');
             activeQRClient = null;
-            qrSessionChatId = null;
-            qrMessageId = null;
         });
 }
 
@@ -199,11 +220,10 @@ async function disconnectActive(chatId) {
         try { await activeQRClient.logout(); } catch {}
         try { activeQRClient.destroy(); } catch {}
         activeQRClient = null;
+        qrMessageId = null;
     }
     activeBackend = null;
     isConnected = false;
-    qrSessionChatId = null;
-    qrMessageId = null;
     bot.sendMessage(chatId, '🔌 Disconnected successfully.');
 }
 
@@ -219,8 +239,8 @@ bot.on('message', async msg => {
         bot.sendMessage(chatId, 'Choose connection method:', {
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: '🌐 MATAPI', callback_data: 'connect_maytapi' },
-                     { text: '📱 QR CODE LOGIN', callback_data: 'connect_qr' }]
+                    [{ text: '🌐 MAYTAPI', callback_data: 'connect_maytapi', style: 'success' },
+                     { text: '📱 QR CODE LOGIN', callback_data: 'connect_qr', style: 'danger' }]
                 ]
             }
         });
@@ -270,7 +290,7 @@ bot.on('callback_query', async query => {
     if (data === 'connect_maytapi') {
         bot.answerCallbackQuery(query.id);
         expectingMaytapiUrl = true;
-        bot.sendMessage(chatId, '🔗 Send your Maytapi screen URL');
+        bot.sendMessage(chatId, '🔗 Send your Maytapi screen URL (e.g. https://api.maytapi.com/api/.../screen?token=...)');
         return;
     }
 
@@ -281,29 +301,25 @@ bot.on('callback_query', async query => {
         return;
     }
 
-    // ─── NEW QR button handler ───
     if (data === 'new_qr') {
         bot.answerCallbackQuery(query.id);
-        // Only proceed if we are in the same chat where the QR was sent
-        if (qrSessionChatId !== chatId) {
-            bot.sendMessage(chatId, 'This QR is from a different session. Start a new one.');
+        if (!activeQRClient) {
+            bot.sendMessage(chatId, '⚠️ No QR session active. Use "QR Code Login" first.');
             return;
         }
-        // Delete the old QR message
+        // Delete old QR message
         if (qrMessageId) {
-            bot.deleteMessage(chatId, qrMessageId).catch(() => {});
+            try { await bot.deleteMessage(chatId, qrMessageId); } catch {}
+            qrMessageId = null;
         }
-        // Destroy current client and start a fresh one
-        if (activeQRClient) {
-            try { await activeQRClient.destroy(); } catch {}
-            activeQRClient = null;
-        }
-        startQRLogin(chatId);
+        // Request a new QR
+        bot.sendMessage(chatId, '⏳ Fetching new QR code…');
+        sendQRForClient(chatId, activeQRClient).catch(() => {});
         return;
     }
 });
 
-// ── File check ──
+// ── File check (lightning fast) ──
 async function checkWithMaytapi(numbers) {
     const registered = [], fresh = [];
     for (const raw of numbers) {
@@ -392,4 +408,4 @@ bot.on('document', async msg => {
     }
 });
 
-console.log('Bot running – KBS styled keyboard + QR with inline New QR button');
+console.log('Bot running – QR sent once, New QR button below');

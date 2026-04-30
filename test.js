@@ -6,7 +6,7 @@ const { Client: WhatsAppClient, LocalAuth } = require('whatsapp-web.js');
 const QRCode = require('qrcode');
 
 // ═══════════════ CONFIG ═══════════════
-const TELEGRAM_TOKEN = '8216427126:AAHF1CFTy-YG5lTJRaJpC_k0pyeWtZdSbiA';
+const TELEGRAM_TOKEN = '8752592084:AAHjk_eHKfx0O3h7dGU6esH0K_jOgy3I2QI';
 
 // ═══════════════ STATE ═══════════════
 let expectingMaytapiUrl = false;
@@ -190,8 +190,8 @@ bot.on('message', async msg => {
         bot.sendMessage(chatId, 'Choose connection method:', {
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: '🌐 Maytapi', callback_data: 'connect_maytapi' },
-                     { text: '📱 QR Code Login', callback_data: 'connect_qr' }]
+                    [{ text: '🌐 MATAPI', callback_data: 'connect_maytapi', style: 'success' },
+                     { text: '📱 QR CODE LOGIN', callback_data: 'connect_qr', style: 'primary'}]
                 ]
             }
         });

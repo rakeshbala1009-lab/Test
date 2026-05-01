@@ -163,7 +163,7 @@ function startQRLogin(chatId) {
         .catch(err => { console.error('QR init error:', err); bot.sendMessage(chatId, '❌ Failed to start QR login.'); activeQRClient = null; });
 }
 
-// ─── Baileys Pairing Code (RELIABLE – uses delay then request) ───
+// ─── Baileys Pairing Code (FIXED – real code, no premature request) ───
 async function startBaileysPairing(chatId, phoneNumber) {
     if (activeBaileysClient) {
         try { activeBaileysClient.end(); } catch {}
@@ -174,22 +174,24 @@ async function startBaileysPairing(chatId, phoneNumber) {
     try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+
     const sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: ['TelegramBot', 'Chrome', '1.0.0']
+        browser: ['Chrome (Linux)', '', ''],   // match working API
+        logger: undefined
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
         if (connection === 'open') {
             activeBackend = 'baileys';
             isConnected = true;
             activeBaileysClient = sock;
             const me = sock.user?.id?.split(':')[0] || '';
-            bot.sendMessage(chatId, `✅ Pairing code linked! Connected as +${me || 'unknown'}.`);
+            bot.sendMessage(chatId, `✅ Linked! Connected as +${me || 'unknown'}.`);
         }
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -204,24 +206,20 @@ async function startBaileysPairing(chatId, phoneNumber) {
     });
 
     try {
-        if (!sock.authState.creds.registered) {
-            await delay(1500);  // Wait for socket readiness
-            const code = await sock.requestPairingCode(phoneNumber);
-            const display = code.length === 8 ? `${code.slice(0,4)}-${code.slice(4)}` : code;
-            bot.sendMessage(chatId,
-                `🔐 *Your pairing code is ready*\n\n` +
-                `\`${display}\`\n\n` +
-                `(Type \`${code}\` without dash on that phone:\n` +
-                `WhatsApp → Linked Devices → Link a Device)`,
-                { parse_mode: 'Markdown' }
-            );
-        } else {
-            bot.sendMessage(chatId, '❌ Session already registered. Disconnect first or use new number.');
-            try { sock.end(); } catch {}
-        }
+        // Crucial: wait long enough for the socket to fully initialise
+        await delay(1600);
+        const code = await sock.requestPairingCode(phoneNumber);
+        const display = code.length === 8 ? `${code.slice(0,4)}-${code.slice(4)}` : code;
+        bot.sendMessage(chatId,
+            `🔐 *Your real WhatsApp linking code*\n\n` +
+            `\`${display}\`\n\n` +
+            `Type **${code}** (no dash) on that phone:\n` +
+            `WhatsApp → Linked Devices → Link a Device`,
+            { parse_mode: 'Markdown' }
+        );
     } catch (err) {
         console.error('requestPairingCode error:', err);
-        bot.sendMessage(chatId, '❌ Failed to get pairing code. Try again.');
+        bot.sendMessage(chatId, '❌ Failed to get pairing code. Try again later.');
         try { sock.end(); } catch {}
         activeBaileysClient = null;
     }
@@ -422,4 +420,4 @@ bot.on('document', async msg => {
     }
 });
 
-console.log('Bot running – Maytapi + QR + Pairing Code (reliable)');
+console.log('Bot running – Real pairing code, number checking ready');

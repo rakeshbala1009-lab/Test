@@ -7,7 +7,8 @@ const QRCode = require('qrcode');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
-  DisconnectReason
+  DisconnectReason,
+  delay
 } = require('@whiskeysockets/baileys');
 
 // ═══════════════ CONFIG ═══════════════
@@ -162,7 +163,7 @@ function startQRLogin(chatId) {
         .catch(err => { console.error('QR init error:', err); bot.sendMessage(chatId, '❌ Failed to start QR login.'); activeQRClient = null; });
 }
 
-// ─── Baileys Pairing Code (FIXED) ───
+// ─── Baileys Pairing Code (RELIABLE – uses delay then request) ───
 async function startBaileysPairing(chatId, phoneNumber) {
     if (activeBaileysClient) {
         try { activeBaileysClient.end(); } catch {}
@@ -175,14 +176,14 @@ async function startBaileysPairing(chatId, phoneNumber) {
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const sock = makeWASocket({
         auth: state,
+        printQRInTerminal: false,
         browser: ['TelegramBot', 'Chrome', '1.0.0']
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
         if (connection === 'open') {
             activeBackend = 'baileys';
             isConnected = true;
@@ -190,7 +191,6 @@ async function startBaileysPairing(chatId, phoneNumber) {
             const me = sock.user?.id?.split(':')[0] || '';
             bot.sendMessage(chatId, `✅ Pairing code linked! Connected as +${me || 'unknown'}.`);
         }
-
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode === DisconnectReason.loggedOut) {
@@ -201,33 +201,27 @@ async function startBaileysPairing(chatId, phoneNumber) {
                 }
             }
         }
-
-        // Request pairing code only when QR event fires
-        if (qr && !activeBaileysClient) {
-            try {
-                const code = await sock.requestPairingCode(phoneNumber);
-                const display = code.length === 8 ? `${code.slice(0,4)}-${code.slice(4)}` : code;
-                bot.sendMessage(chatId,
-                    `🔐 *Your pairing code is ready*\n\n` +
-                    `\`${display}\`\n\n` +
-                    `(Type \`${code}\` without dash on that phone:\n` +
-                    `WhatsApp → Linked Devices → Link a Device)`,
-                    { parse_mode: 'Markdown' }
-                );
-            } catch (err) {
-                console.error('requestPairingCode error:', err);
-                bot.sendMessage(chatId, '❌ Failed to get pairing code. Try again.');
-                try { sock.end(); } catch {}
-                activeBaileysClient = null;
-            }
-        }
     });
 
     try {
-        await sock.connect();
+        if (!sock.authState.creds.registered) {
+            await delay(1500);  // Wait for socket readiness
+            const code = await sock.requestPairingCode(phoneNumber);
+            const display = code.length === 8 ? `${code.slice(0,4)}-${code.slice(4)}` : code;
+            bot.sendMessage(chatId,
+                `🔐 *Your pairing code is ready*\n\n` +
+                `\`${display}\`\n\n` +
+                `(Type \`${code}\` without dash on that phone:\n` +
+                `WhatsApp → Linked Devices → Link a Device)`,
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            bot.sendMessage(chatId, '❌ Session already registered. Disconnect first or use new number.');
+            try { sock.end(); } catch {}
+        }
     } catch (err) {
-        console.error('Socket connect error:', err);
-        bot.sendMessage(chatId, '❌ Could not connect to WhatsApp.');
+        console.error('requestPairingCode error:', err);
+        bot.sendMessage(chatId, '❌ Failed to get pairing code. Try again.');
         try { sock.end(); } catch {}
         activeBaileysClient = null;
     }
@@ -331,10 +325,42 @@ bot.on('callback_query', async query => {
     }
 });
 
-// ── Check functions ──
-async function updateProgress() { ... }  // unchanged
-async function checkWithMaytapi(numbers) { ... }
-async function checkWithQR(numbers) { ... }
+// ─── Progress updater ───
+async function updateProgress() {
+    if (!checkingMessageId) return;
+    try {
+        await bot.editMessageText(
+            `Number checking ${checkingDone}/${checkingTotal}`,
+            { chat_id: checkingChatId, message_id: checkingMessageId }
+        );
+    } catch {}
+}
+
+// ─── Check functions ───
+async function checkWithMaytapi(numbers) {
+    const registered = [], fresh = [];
+    for (let raw of numbers) {
+        const c = cleanNumber(raw); if (!c) continue;
+        const ok = await maytapiCheckNumber(activeMaytapi, c);
+        if (ok) registered.push(c); else fresh.push(c);
+        checkingDone++; await updateProgress();
+    }
+    return { registered, fresh };
+}
+
+async function checkWithQR(numbers) {
+    const registered = [], fresh = [];
+    for (let raw of numbers) {
+        const c = cleanNumber(raw); if (!c) continue;
+        try {
+            const jid = await activeQRClient.getNumberId(`${c}@c.us`);
+            if (jid) registered.push(c); else fresh.push(c);
+        } catch { fresh.push(c); }
+        checkingDone++; await updateProgress();
+    }
+    return { registered, fresh };
+}
+
 async function checkWithBaileys(numbers) {
     const registered = [], fresh = [];
     for (let raw of numbers) {
@@ -348,5 +374,52 @@ async function checkWithBaileys(numbers) {
     return { registered, fresh };
 }
 
-// (The remaining file check, progress update, etc. are identical to previous full code, but I'll truncate for brevity.)
-// Include the same document handler as before with the three backend checks.
+// ─── File check handler ───
+bot.on('document', async msg => {
+    const chatId = msg.chat.id;
+    if (!isConnected) return bot.sendMessage(chatId, '❌ No active connection.');
+
+    try {
+        const filePath = await bot.downloadFile(msg.document.file_id, './');
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const numbers = content.split(/\r?\n/).map(l => l.trim()).filter(l => l);
+        fs.unlinkSync(filePath);
+
+        checkingChatId = chatId;
+        checkingTotal = numbers.length;
+        checkingDone = 0;
+
+        const progressMsg = await bot.sendMessage(chatId, `Number checking 0/${checkingTotal}`);
+        checkingMessageId = progressMsg.message_id;
+
+        let results;
+        if (activeBackend === 'maytapi') results = await checkWithMaytapi(numbers);
+        else if (activeBackend === 'qr') results = await checkWithQR(numbers);
+        else if (activeBackend === 'baileys') results = await checkWithBaileys(numbers);
+        else { bot.sendMessage(chatId, 'Unknown backend'); return; }
+
+        await bot.deleteMessage(chatId, checkingMessageId).catch(() => {});
+
+        let report = '';
+        if (results.registered.length)
+            report += '*Already Created Account Number ✅:*\n' + results.registered.join('\n') + '\n\n';
+        if (results.fresh.length)
+            report += '*Fresh Number ❌*\n' + results.fresh.map(n => `+${n}`).join('\n');
+        if (report) bot.sendMessage(chatId, report, { parse_mode: 'Markdown' });
+
+        if (results.fresh.length) {
+            const freshPath = path.join(__dirname, 'Freash_Number.txt');
+            fs.writeFileSync(freshPath, results.fresh.map(n => `+${n}`).join('\n'), 'utf-8');
+            await bot.sendDocument(chatId, freshPath, { caption: `Fresh numbers (${results.fresh.length})` });
+            fs.unlinkSync(freshPath);
+        } else {
+            bot.sendMessage(chatId, 'No fresh numbers found ✅');
+        }
+
+    } catch (err) {
+        console.error(err);
+        bot.sendMessage(chatId, '❌ Error processing file.');
+    }
+});
+
+console.log('Bot running – Maytapi + QR + Pairing Code (reliable)');

@@ -58,8 +58,9 @@ COUNTRIES_DATA = load_countries_db()
 def get_country_info(country_name):
     return COUNTRIES_DATA.get(country_name, {"flag": "🏁", "code": ""})
 
-# ==================== JOIN CHECK CONFIGURATION ====================
+# ==================== JOIN CHECK CONFIGURATION (DISABLED) ====================
 
+# Required channels are no longer enforced, kept only for reference
 REQUIRED_CHANNELS = ["@RgxNumberChanel", "@RgxOtp"]
 
 GROUP_LINKS = {
@@ -177,6 +178,7 @@ def back_to_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_menu", style=KBS.PRIMARY)],
     ])
 
+# Keep join keyboard for reference but no longer used
 def join_required_keyboard() -> InlineKeyboardMarkup:
     rows = []
     tech = safe_url(GROUP_LINKS.get("tech_channel"))
@@ -444,8 +446,9 @@ def format_number_message(country, service, number, first_name=None):
     keyboard = InlineKeyboardMarkup(rows)
     return message, keyboard
 
-# ==================== JOIN CHECK FUNCTIONS ====================
+# ==================== JOIN CHECK FUNCTIONS (NO LONGER ENFORCED) ====================
 
+# These functions are kept for potential future use but are no longer called.
 async def check_joined_channels(bot, user_id):
     try:
         for channel in REQUIRED_CHANNELS:
@@ -458,26 +461,12 @@ async def check_joined_channels(bot, user_id):
         return False
 
 async def verify_user_access(bot, user_id):
-    if user_id in ADMIN_IDS:
-        return True
-    if await check_joined_channels(bot, user_id):
-        db_exec("UPDATE users SET joined_check = 1 WHERE user_id = ?", (user_id,))
-        return True
-    else:
-        db_exec("UPDATE users SET joined_check = 0 WHERE user_id = ?", (user_id,))
-        return False
+    # Always return True – no join enforcement
+    return True
 
 async def send_join_required(bot, user_id):
-    await bot.send_message(
-        user_id,
-        "⚠️ *Access Required*\n\n"
-        "Please join ALL of the following to use this bot:\n\n"
-        "1️⃣ Tech Channel\n"
-        "2️⃣ OTP Group\n\n"
-        "✅ After joining, click *I've Joined All — Verify* below.",
-        reply_markup=join_required_keyboard(),
-        parse_mode='Markdown',
-    )
+    # No longer used, kept for completeness
+    pass
 
 # ==================== OTP & CLEANUP JOBS ====================
 
@@ -623,10 +612,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_exec("UPDATE users SET last_active = ? WHERE user_id = ?",
             (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id))
 
-    if not await verify_user_access(context.bot, user_id):
-        await send_join_required(context.bot, user_id)
-        return
-
+    # No join check – directly go to main menu
     await update.message.reply_text(
         welcome_text(user_id, first_name),
         reply_markup=bottom_menu_keyboard(user_id),
@@ -716,11 +702,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_name = query.from_user.first_name or "User"
     data = query.data
 
-    if not await verify_user_access(context.bot, user_id):
-        await query.answer("❌ Please join all channels first!", show_alert=True)
-        await send_join_required(context.bot, user_id)
-        return
-
+    # No join verification required
     await query.answer()
     action = data[len("menu_"):]
 
@@ -745,36 +727,15 @@ async def back_to_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-
     await query.answer()
-
-    if await verify_user_access(context.bot, user_id):
-        try:
-            await query.delete_message()
-        except Exception:
-            pass
-        await context.bot.send_message(
-            user_id,
-            f"✅ *Verification Successful!*\n\n"
-            f"Welcome to *Developer ✆  RGX NUMBER BOT  Bot!*\n"
-            f"🆔 Your ID: `{user_id}`\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👨‍💻 *Developer:* ✆  RGX NUMBER BOT ",
-            reply_markup=bottom_menu_keyboard(user_id),
-            parse_mode='Markdown')
-    else:
-        await query.answer(
-            "❌ You haven't joined all channels yet! Please join all and try again.",
-            show_alert=True)
+    # Since join is no longer enforced, just show a message and prompt to main
+    await query.answer("✅ Access is unrestricted!", show_alert=True)
 
 async def refresh_stock_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
 
-    if not await verify_user_access(context.bot, user_id):
-        await query.answer("❌ Access denied! Please join channels.", show_alert=True)
-        return
-
+    # No join check
     await query.answer("🔄 Refreshed!")
     try:
         await query.edit_message_text(
@@ -787,9 +748,7 @@ async def select_country_callback(update: Update, context: ContextTypes.DEFAULT_
     user_id = query.from_user.id
     first_name = query.from_user.first_name or "User"
 
-    if not await verify_user_access(context.bot, user_id):
-        await query.answer("❌ Access denied! Please join channels.", show_alert=True)
-        return
+    # No join check
 
     await query.answer("⏳ Allocating your number...")
 
@@ -860,9 +819,7 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = query.from_user.id
     first_name = query.from_user.first_name or "User"
 
-    if not await verify_user_access(context.bot, user_id):
-        await query.answer("❌ Access denied! Please join channels.", show_alert=True)
-        return
+    # No join check
 
     await query.answer("⏳ Getting next number...")
 
@@ -955,9 +912,7 @@ async def back_to_countries_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     user_id = query.from_user.id
 
-    if not await verify_user_access(context.bot, user_id):
-        await query.answer("❌ Access denied! Please join channels.", show_alert=True)
-        return
+    # No join check
 
     await query.answer()
 
@@ -984,7 +939,7 @@ async def back_to_countries_callback(update: Update, context: ContextTypes.DEFAU
         except Exception:
             pass
 
-# ==================== ADMIN SECTION ====================
+# ==================== ADMIN SECTION (UNTCHANGED) ====================
 
 async def enter_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1647,11 +1602,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    if text in (BTN_GET_NUMBER, BTN_LIVE_STOCK, BTN_SUPPORT, BTN_ADMIN):
-        if not await verify_user_access(context.bot, user_id):
-            await send_join_required(context.bot, user_id)
-            return
-
+    # No join verification required anymore – direct dispatch
     if text == BTN_GET_NUMBER:
         await send_get_number_panel(update, context)
     elif text == BTN_LIVE_STOCK:
@@ -1708,7 +1659,7 @@ def main():
 
     print(f"✅ Admin IDs: {ADMIN_IDS}")
     print(f"✅ Loaded {len(COUNTRIES_DATA)} countries from JSON file")
-    print("✅ Join Check Active")
+    print("✅ Join Check REMOVED – unrestricted access")
     print("✅ Country & Service Manager Integrated")
     print("✅ Referral & Credits Removed")
     print("✅ Keyboard Layout: 2x2 then 1x1 (+ admin 1x1)")
